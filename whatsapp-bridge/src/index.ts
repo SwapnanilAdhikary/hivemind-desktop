@@ -1,5 +1,6 @@
 import makeWASocket, {
   DisconnectReason,
+  fetchLatestBaileysVersion,
   useMultiFileAuthState,
   type WASocket,
 } from "@whiskeysockets/baileys";
@@ -94,7 +95,8 @@ async function connectToWhatsApp() {
   console.log("[WhatsApp Bridge] Connecting to WhatsApp...");
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
-  const waVersion: [number, number, number] = [2, 3000, 1027934701];
+  const { version: waVersion } = await fetchLatestBaileysVersion();
+  console.log(`[WhatsApp Bridge] Using WA version: ${waVersion.join(".")}`);
 
   sock = makeWASocket({
     auth: state,

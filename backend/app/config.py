@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     # LLM providers
     openai_api_key: str = ""
+    openai_model: str = "gpt-5.2"
     anthropic_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
     default_llm_provider: str = "ollama"

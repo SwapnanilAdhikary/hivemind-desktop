@@ -18,14 +18,17 @@ def get_ollama_llm(model: str | None = None) -> BaseChatModel:
     return ChatOllama(
         model=model or settings.default_model_name,
         base_url=settings.ollama_base_url,
+        # Small thinking models (qwen3 etc.) emit reasoning that breaks
+        # single-word parsing and adds 20-60s latency per call.
+        reasoning=False,
     )
 
 
-def get_openai_llm(model: str = "gpt-4o") -> BaseChatModel:
+def get_openai_llm(model: str | None = None) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
-        model=model,
+        model=model or settings.openai_model,
         api_key=settings.openai_api_key,
     )
 

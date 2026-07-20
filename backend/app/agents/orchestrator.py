@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any, Literal, TypedDict
 
@@ -11,6 +12,32 @@ from app.tracing.tracer import TracingContext, new_run_id
 from app.websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
+
+
+WHATSAPP_SYSTEM_PROMPT = (
+    "You are a WhatsApp auto-reply assistant. Reply in 1-2 short sentences max. "
+    "Be direct and useful. Answer the question or acknowledge the message. "
+    "No greetings, no sign-offs, no markdown, no bullet lists, no thinking out loud. "
+    "Output only the reply text the user should receive."
+)
+
+
+def _clean_reply(text: str) -> str:
+    """Strip model thinking blocks and trim whitespace."""
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<thinking>[\s\S]*?</thinking>", "", text, flags=re.IGNORECASE)
+    return text.strip()
+
+
+def _extract_keyword(text: str, options: tuple[str, ...], default: str) -> str:
+    """Find the first expected keyword in a (possibly verbose) LLM response."""
+    lowered = text.lower()
+    if lowered.strip() in options:
+        return lowered.strip()
+    for opt in options:
+        if opt in lowered:
+            return opt
+    return default
 
 
 class AgentState(TypedDict, total=False):
@@ -89,10 +116,8 @@ async def check_urgency(state: AgentState) -> AgentState:
         )
         try:
             result = await llm.ainvoke([{"role": "user", "content": prompt}])
-            llm_response = result.content.strip()
-            urgency = llm_response.lower()
-            if urgency not in ("high", "medium", "low"):
-                urgency = "medium"
+            llm_response = _clean_reply(result.content)
+            urgency = _extract_keyword(llm_response, ("high", "medium", "low"), default="medium")
             state["urgency"] = urgency
             ctx.set_output(
                 llm_raw_response=llm_response,
@@ -151,11 +176,13 @@ async def decide_action(state: AgentState) -> AgentState:
         )
         try:
             result = await llm.ainvoke([{"role": "user", "content": prompt}])
-            llm_response = result.content.strip()
-            action = llm_response.lower().replace(" ", "_")
+            llm_response = _clean_reply(result.content)
             valid = {"auto_reply", "notify", "queue", "ignore"}
-            if action not in valid:
-                action = "notify"
+            action = _extract_keyword(
+                llm_response.replace(" ", "_"),
+                ("auto_reply", "queue", "ignore", "notify"),
+                default="notify",
+            )
             state["action"] = action
             ctx.set_output(
                 llm_raw_response=llm_response,
@@ -191,28 +218,45 @@ async def draft_reply(state: AgentState) -> AgentState:
     run_id = state.get("run_id", new_run_id())
     async with TracingContext(run_id, "orchestrator", "draft_reply") as ctx:
         llm = llm_router.get_llm()
-        prompt = (
-            f"Draft a helpful reply to this message on {state['platform']}.\n"
-            f"From: {state.get('sender_name', state['sender'])}\n"
-            f"Message: {state['content'][:500]}\n\n"
-            "Write a concise, friendly reply."
-        )
+        platform = state["platform"]
+        sender = state.get("sender_name", state["sender"])
+        content = state["content"][:500]
+
+        if platform == "whatsapp":
+            messages = [
+                {"role": "system", "content": WHATSAPP_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"From: {sender}\nMessage: {content}\n\nReply:",
+                },
+            ]
+            prompt = messages[1]["content"]
+        else:
+            prompt = (
+                f"Draft a helpful reply to this message on {platform}.\n"
+                f"From: {sender}\n"
+                f"Message: {content}\n\n"
+                "Write a concise, friendly reply."
+            )
+            messages = [{"role": "user", "content": prompt}]
+
         ctx.set_input(
             prompt=prompt,
-            platform=state["platform"],
-            sender=state.get("sender_name", state["sender"]),
+            platform=platform,
+            sender=sender,
             original_message=state["content"][:300],
         )
         try:
-            result = await llm.ainvoke([{"role": "user", "content": prompt}])
-            state["draft_reply"] = result.content
+            result = await llm.ainvoke(messages)
+            reply = _clean_reply(result.content or "")
+            state["draft_reply"] = reply
             ctx.set_output(
-                draft_reply=result.content,
-                reply_length=len(result.content),
+                draft_reply=reply,
+                reply_length=len(reply),
             )
             await ctx.record_decision(
-                reasoning=f"Drafted reply ({len(result.content)} chars) for {state['platform']} "
-                          f"message from {state.get('sender_name', state['sender'])}",
+                reasoning=f"Drafted reply ({len(reply)} chars) for {platform} "
+                          f"message from {sender}",
                 chosen="reply_drafted",
                 alternatives=[],
             )
